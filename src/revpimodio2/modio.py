@@ -164,6 +164,7 @@ class RevPiModIO(object):
         self._devselect = DevSelect()
         self._exit = Event()
         self._exit_level = 0
+        self._signal_received = Event()  # Thread-safe signal flag
         self._imgwriter = None
         self._ioerror = 0
         self._length = 0
@@ -244,10 +245,16 @@ class RevPiModIO(object):
         :param signum: Signalnummer
         :param sigframe: Signalframe
         """
+        # Restore default handlers first
         signal(SIGINT, SIG_DFL)
         signal(SIGTERM, SIG_DFL)
-        self._exit_level |= 4
-        self.exit(full=True)
+
+        # Use Event for thread-safe signaling (minimal work in signal handler)
+        self._signal_received.set()
+
+        # Signal exit event to wake up threads
+        self._exit.set()
+        self._waitexit.set()
 
     def __exit_jobs(self):
         """Shutdown sub systems."""
@@ -954,6 +961,11 @@ class RevPiModIO(object):
 
         :param full: Entfernt auch alle Devices aus autorefresh
         """
+        # Check if called from signal handler
+        if self._signal_received.is_set():
+            full = True  # Always full cleanup on signal
+            self._exit_level |= 4  # Set signal exit level
+
         self._exit_level |= 1 if full else 0
 
         # Echten Loopwert vor Events speichern
@@ -1196,6 +1208,10 @@ class RevPiModIO(object):
             self.exit(full=False)
             self.__exit_jobs()
             raise e
+
+        # Check if exit was triggered by signal
+        if self._signal_received.is_set():
+            self.exit(full=True)
 
         # Exitstrategie ausführen
         self.__exit_jobs()
