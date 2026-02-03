@@ -14,6 +14,9 @@ from timeit import default_timer
 from ._internal import RISING, FALLING, BOTH
 from .io import IOBase
 
+# Maximum size for event queues to prevent memory exhaustion
+MAX_EVENT_QUEUE_SIZE = 10000
+
 
 class EventCallback(Thread):
     """Thread fuer das interne Aufrufen von Event-Funktionen.
@@ -397,9 +400,9 @@ class ProcimgWriter(Thread):
         super().__init__()
         self.__dict_delay = {}
         self.__eventth = Thread(target=self.__exec_th)
-        self._eventqth = queue.Queue()
+        self._eventqth = queue.Queue(maxsize=MAX_EVENT_QUEUE_SIZE)
         self.__eventwork = False
-        self._eventq = queue.Queue()
+        self._eventq = queue.Queue(maxsize=MAX_EVENT_QUEUE_SIZE)
         self._modio = parentmodio
         self._refresh = 0.05
         self._work = Event()
@@ -430,10 +433,16 @@ class ProcimgWriter(Thread):
                         and not boolor
                     ):
                         if regfunc.delay == 0:
-                            if regfunc.as_thread:
-                                self._eventqth.put((regfunc, io_event._name, io_event.value), False)
-                            else:
-                                self._eventq.put((regfunc, io_event._name, io_event.value), False)
+                            try:
+                                if regfunc.as_thread:
+                                    self._eventqth.put((regfunc, io_event._name, io_event.value), False)
+                                else:
+                                    self._eventq.put((regfunc, io_event._name, io_event.value), False)
+                            except queue.Full:
+                                warnings.warn(
+                                    f"Event queue full, dropping event for {io_event._name}",
+                                    RuntimeWarning,
+                                )
                         else:
                             # Verzögertes Event in dict einfügen
                             tup_fire = (
@@ -449,10 +458,16 @@ class ProcimgWriter(Thread):
             else:
                 for regfunc in dev._dict_events[io_event]:
                     if regfunc.delay == 0:
-                        if regfunc.as_thread:
-                            self._eventqth.put((regfunc, io_event._name, io_event.value), False)
-                        else:
-                            self._eventq.put((regfunc, io_event._name, io_event.value), False)
+                        try:
+                            if regfunc.as_thread:
+                                self._eventqth.put((regfunc, io_event._name, io_event.value), False)
+                            else:
+                                self._eventq.put((regfunc, io_event._name, io_event.value), False)
+                        except queue.Full:
+                            warnings.warn(
+                                f"Event queue full, dropping event for {io_event._name}",
+                                RuntimeWarning,
+                            )
                     else:
                         # Verzögertes Event in dict einfügen
                         tup_fire = (
@@ -619,11 +634,18 @@ class ProcimgWriter(Thread):
                             self.__dict_delay[tup_fire] -= 1
                             if self.__dict_delay[tup_fire] <= 0:
                                 # Verzögertes Event übernehmen und löschen
-                                if tup_fire[0].as_thread:
-                                    self._eventqth.put(tup_fire, False)
-                                else:
-                                    self._eventq.put(tup_fire, False)
-                                del self.__dict_delay[tup_fire]
+                                try:
+                                    if tup_fire[0].as_thread:
+                                        self._eventqth.put(tup_fire, False)
+                                    else:
+                                        self._eventq.put(tup_fire, False)
+                                    del self.__dict_delay[tup_fire]
+                                except queue.Full:
+                                    # Keep in delay dict to retry next cycle
+                                    warnings.warn(
+                                        f"Event queue full, retrying delayed event for {tup_fire[1]}",
+                                        RuntimeWarning,
+                                    )
 
             mrk_delay = default_timer() % self._refresh
             # Second default_timer call include calculation time from above

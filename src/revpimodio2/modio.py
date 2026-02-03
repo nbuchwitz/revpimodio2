@@ -10,7 +10,7 @@ from json import load as jload
 from multiprocessing import cpu_count
 from os import F_OK, R_OK, access
 from os import stat as osstat
-from queue import Empty
+from queue import Empty, Full
 from signal import SIGINT, SIGTERM, SIG_DFL, signal
 from stat import S_ISCHR
 from threading import Event, Lock, Thread
@@ -1156,10 +1156,16 @@ class RevPiModIO(object):
                             or regfunc.edge == FALLING
                             and not io.value
                         ):
-                            if regfunc.as_thread:
-                                self._imgwriter._eventqth.put((regfunc, io._name, io.value), False)
-                            else:
-                                self._imgwriter._eventq.put((regfunc, io._name, io.value), False)
+                            try:
+                                if regfunc.as_thread:
+                                    self._imgwriter._eventqth.put((regfunc, io._name, io.value), False)
+                                else:
+                                    self._imgwriter._eventq.put((regfunc, io._name, io.value), False)
+                            except Full:
+                                warnings.warn(
+                                    f"Event queue full, dropping prefire event for {io._name}",
+                                    RuntimeWarning,
+                                )
 
         # ImgWriter mit Eventüberwachung aktivieren
         self._imgwriter._collect_events(True)
