@@ -530,7 +530,8 @@ class ProcimgWriter(Thread):
             ot = default_timer()
 
             # At this point, we slept and have the rest of delay from last cycle
-            if not self.lck_refresh.acquire(timeout=mrk_delay):
+            lock_acquired = self.lck_refresh.acquire(timeout=mrk_delay)
+            if not lock_acquired:
                 warnings.warn(
                     "cycle time of {0} ms exceeded in your cycle function"
                     "".format(int(self._refresh * 1000)),
@@ -541,71 +542,74 @@ class ProcimgWriter(Thread):
                 continue
 
             try:
-                fh.seek(0)
-                fh.readinto(bytesbuff)
+                try:
+                    fh.seek(0)
+                    fh.readinto(bytesbuff)
 
-                for dev in self._modio._lst_refresh:
-                    with dev._filelock:
-                        if dev._shared_procimg:
-                            # Set modified outputs one by one
-                            for io in dev._shared_write:
-                                if not io._write_to_procimg():
-                                    raise IOError("error on _write_to_procimg")
-                            dev._shared_write.clear()
+                    for dev in self._modio._lst_refresh:
+                        with dev._filelock:
+                            if dev._shared_procimg:
+                                # Set modified outputs one by one
+                                for io in dev._shared_write:
+                                    if not io._write_to_procimg():
+                                        raise IOError("error on _write_to_procimg")
+                                dev._shared_write.clear()
 
-                            # Read all device bytes, because it is shared
-                            fh.seek(dev.offset)
-                            bytesbuff[dev._slc_devoff] = fh.read(len(dev._ba_devdata))
+                                # Read all device bytes, because it is shared
+                                fh.seek(dev.offset)
+                                bytesbuff[dev._slc_devoff] = fh.read(len(dev._ba_devdata))
 
-                        if self._modio._monitoring or dev._shared_procimg:
-                            # Inputs und Outputs in Puffer
-                            dev._ba_devdata[:] = bytesbuff[dev._slc_devoff]
-                            if (
-                                self.__eventwork
-                                and len(dev._dict_events) > 0
-                                and dev._ba_datacp != dev._ba_devdata
-                            ):
-                                self.__check_change(dev)
+                            if self._modio._monitoring or dev._shared_procimg:
+                                # Inputs und Outputs in Puffer
+                                dev._ba_devdata[:] = bytesbuff[dev._slc_devoff]
+                                if (
+                                    self.__eventwork
+                                    and len(dev._dict_events) > 0
+                                    and dev._ba_datacp != dev._ba_devdata
+                                ):
+                                    self.__check_change(dev)
+                            else:
+                                # Inputs in Puffer, Outputs in Prozessabbild
+                                dev._ba_devdata[dev._slc_inp] = bytesbuff[dev._slc_inpoff]
+                                if (
+                                    self.__eventwork
+                                    and len(dev._dict_events) > 0
+                                    and dev._ba_datacp != dev._ba_devdata
+                                ):
+                                    self.__check_change(dev)
+
+                                fh.seek(dev._slc_outoff.start)
+                                fh.write(dev._ba_devdata[dev._slc_out])
+
+                    if self._modio._buffedwrite:
+                        fh.flush()
+
+                except IOError as e:
+                    self._modio._gotioerror("autorefresh", e, mrk_warn)
+                    mrk_warn = self._modio._debug == -1
+                    continue
+
+                else:
+                    if not mrk_warn:
+                        if self._modio._debug == 0:
+                            warnings.warn("recover from io errors on process image", RuntimeWarning)
                         else:
-                            # Inputs in Puffer, Outputs in Prozessabbild
-                            dev._ba_devdata[dev._slc_inp] = bytesbuff[dev._slc_inpoff]
-                            if (
-                                self.__eventwork
-                                and len(dev._dict_events) > 0
-                                and dev._ba_datacp != dev._ba_devdata
-                            ):
-                                self.__check_change(dev)
+                            warnings.warn(
+                                "recover from io errors on process image - total "
+                                "count of {0} errors now"
+                                "".format(self._modio._ioerror),
+                                RuntimeWarning,
+                            )
+                    mrk_warn = True
 
-                            fh.seek(dev._slc_outoff.start)
-                            fh.write(dev._ba_devdata[dev._slc_out])
-
-                if self._modio._buffedwrite:
-                    fh.flush()
-
-            except IOError as e:
-                self._modio._gotioerror("autorefresh", e, mrk_warn)
-                mrk_warn = self._modio._debug == -1
-                self.lck_refresh.release()
-                continue
-
-            else:
-                if not mrk_warn:
-                    if self._modio._debug == 0:
-                        warnings.warn("recover from io errors on process image", RuntimeWarning)
-                    else:
-                        warnings.warn(
-                            "recover from io errors on process image - total "
-                            "count of {0} errors now"
-                            "".format(self._modio._ioerror),
-                            RuntimeWarning,
-                        )
-                mrk_warn = True
-
-                # Alle aufwecken
-                self.lck_refresh.release()
-                self.newdata.set()
+                    # Alle aufwecken
+                    self.newdata.set()
 
             finally:
+                # Always release lock if it was acquired
+                if lock_acquired:
+                    self.lck_refresh.release()
+
                 # Verzögerte Events prüfen
                 if self.__eventwork:
                     for tup_fire in tuple(self.__dict_delay.keys()):
